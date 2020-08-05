@@ -1,0 +1,474 @@
+---
+title: "Payment Calculator"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: bootstrap
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(rhandsontable)
+library(plotly)
+library(rAmCharts)
+library(lubridate)
+library(kableExtra)
+library(highcharter)
+
+
+equiv_rate <- function (rate, from.freq = 1, to.freq = 1){
+  cc.rate <- ifelse(from.freq == Inf, rate, log(1 + rate/from.freq) * 
+                      from.freq)
+  if (to.freq == Inf) 
+    cc.rate
+  else 
+    (exp(cc.rate/to.freq) - 1) * to.freq
+}
+
+annuity_installment<- function (rate, n.periods = Inf, pv = if (missing(fv)) 1 else 0, 
+          fv = 0, terminal.payment = 0, immediate.start = FALSE, cf.freq = 1, 
+          comp.freq = 1){
+  r = equiv_rate(rate, comp.freq, cf.freq)/cf.freq
+  df <- (1 + r)^-n.periods
+  annuity.pv = pv + (fv - terminal.payment) * df * if (immediate.start) 
+    1 + r
+  else 1
+  if (rate == 0) 
+    return(annuity.pv/n.periods)
+  adjust <- if (immediate.start) 
+    1 + r
+  else 1
+  r * annuity.pv/(adjust * (1 - df))
+}
+
+annuity_period<- function (rate, instalment = 1, pv = if (missing(fv)) 1 else 0, 
+                           fv = 0, terminal.payment = 0, immediate.start = FALSE, cf.freq = 1, 
+                           comp.freq = 1, round2int.digits = 3){
+  if (rate == 0) 
+    return((pv + fv - terminal.payment)/instalment)
+  r = equiv.rate(rate, comp.freq, cf.freq)/cf.freq
+  pv = pv - if (immediate.start) 
+    instalment
+  else 0
+  df <- (instalment/r - pv)/(fv - terminal.payment + instalment/r)
+  n <- -log(df)/log(1 + r) + if (immediate.start) 
+    1
+  else 0
+  as.integer(n) + zapsmall(n - as.integer(n), round2int.digits)
+}
+
+calculator_without_contribution<-function(rate, debt, loan_term, min_monthly,employer_contribution, maximum_benefit){
+  rate = rate/100
+  total_interest = 0
+  total_payment = 0
+  total_contribution = 0
+  ending_balance <- 1
+  summary_list <- data.frame()
+  remaining_cont = maximum_benefit
+   for (i in 1:100000){
+      if (i == 1){
+        beginning_balance = debt
+      }else{
+        beginning_balance = ending_balance
+        if (remaining_cont > 0){
+          remaining_cont = remaining_cont - employer_contribution
+          }else{
+            remaining_cont = 0
+            }}
+      
+      if (beginning_balance < min_monthly){
+          min_monthly_pay = round((1+rate/12)*beginning_balance,2)
+      }else{
+        min_monthly_pay = min_monthly}
+      
+      interest_pay = round((rate/12)*beginning_balance,2)
+      base_principal_pay = min_monthly_pay - interest_pay
+      
+      
+      if (remaining_cont >= employer_contribution) {
+        if ((beginning_balance - base_principal_pay) > employer_contribution){
+          pay_contribution = employer_contribution
+        }else{
+          pay_contribution = beginning_balance - base_principal_pay}
+      # }else if (employer_contribution == maximum_benefit){
+      #     pay_contribution = employer_contribution
+      }else{
+        pay_contribution = 0}
+        
+      ending_balance = round(beginning_balance - base_principal_pay - pay_contribution,2)
+      
+      total_interest = total_interest + interest_pay
+      total_payment = total_payment + min_monthly_pay
+      total_contribution = total_contribution + pay_contribution
+      
+      if (i>0){
+        year = round(i/12,0)
+          row_list <- c(as.integer(i), total_interest, total_payment, total_contribution, ending_balance)
+          summary_list <- rbind(summary_list, row_list)
+          colnames(summary_list)<-c('Month', 'Total Interest', 'Total Payment', 'Total Contribution', 'Ending Balance')}
+
+      if (ending_balance <= 0){
+        break
+      }
+
+      
+    }
+  return(summary_list)
+}
+
+
+```
+
+Calculation
+===================================== 
+
+Column {.sidebar data-height=900 .no-mobile}
+-----------------------------------------------------------------------
+
+Calculate savings when additional contributions is made towards your student loans.
+
+Please enter your debt information below.
+
+```{r}
+numericInput('debt', 'Student Loan Debt', min = 0, value = 30236)
+numericInput('rate', 'Interest Rate', min = 0, value = 4.98)
+numericInput('loan_term', 'Loan Term (Years)', min = 0, value = 10)
+# actionButton('calc', 'Calculate Min. Monthly')
+
+min_warning<-reactive({
+    round(input$debt * ((input$rate/100))/12,2)
+  })
+output$warn<-renderText({paste('Warning: The lowest Min. Monthly that can be used is: ',
+               min_warning(),'. Anything below is negative amortizing.
+              ', sep ='')})
+span(textOutput("warn"), style="color:red; font-size:80%")
+
+output$inst<-renderText({paste("To recalculate Min. Monthly Payment based on the parameters above click 'Recalculate Min. Monthly' or
+                               you may input your own Min. Monthly.", sep ='')})
+span(textOutput("inst"), style="font-size:80%")
+
+
+# output$warn<-renderText({paste('Warning: The lowest Min. Monthly that can be used is: ',
+#                min_warning(),'. Anything below is negative amortizing.', sep ='')})
+# span(textOutput("warn"), style="color:red; font-size:80%")
+
+int_rate<-eventReactive(input$calc,{input$rate})
+loan_term<-eventReactive(input$calc, {input$loan_term})
+debt<-eventReactive(input$calc, {input$debt})
+
+calc_min_monthly<-eventReactive(input$calc, {
+    x<-annuity_installment(rate =int_rate()/100, n.periods = loan_term()*12, pv = debt(), 
+          fv = 0, terminal.payment = 0, immediate.start = FALSE, cf.freq = 12, 
+          comp.freq = 12)
+    # paste('Minimum Monthly Should be: ',round(x,2))
+    (round(x,2))
+  })
+
+
+output$min_update<-renderUI({
+    updateNumericInput(session, 'min_monthly', value = as.numeric(calc_min_monthly()))
+    output$suppress_error<-renderText({paste('', sep ='')})
+    span(textOutput("suppress_error"), style="color:red, font-size:50%")
+  })
+
+fillCol(height = 75, flex = c(NA, NA,NA),
+numericInput('min_monthly', 'Min. Monthly Payment', min = 0, value = 291.35),
+uiOutput('min'),
+uiOutput('min_update'))
+
+fillCol(height = 75, flex = c(1),
+actionButton('calc', 'Recalculate Min. Monthly'))
+
+
+# numericInput('min_monthly', 'Min. Monthly Payment', min = 0, value = 291.35)
+fillCol(height = 200, flex = c(NA, NA,NA),
+numericInput('employer_cont', 'Additional Contributions per Month', min = 0, value = 100),
+numericInput('max_benefit', 'Total Contributions Payments', min = 0, value = 40000),
+actionButton('submit', 'Submit'))
+# output$min_update<-renderUI({
+#     updateNumericInput(session, 'min_monthly', value = calc_min_monthly())
+#     output$warn<-renderText({paste('Warning: The lowest Min. Monthly that can be used is: ',
+#                      min_warning())})
+#     span(textOutput("warn"), style="color:red")
+#   })
+# 
+# actionButton('calc', 'Recalculate Min. Monthly')
+
+table<-eventReactive(input$submit,{
+    table<-calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term,
+        min_monthly = input$min_monthly,employer_contribution = 0,
+        maximum_benefit = 0)
+    table<-table%>%
+      mutate(Type = 'Without Contribution')
+    })
+
+table_cont<-eventReactive(input$submit,{
+      table_cont<-calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term,
+      min_monthly = input$min_monthly,employer_contribution = input$employer_cont,
+      maximum_benefit = input$max_benefit)
+      table_cont<-table_cont%>%
+        mutate(Type = 'With Contribution')
+
+      })
+
+
+```
+
+
+
+Row 
+-------------------------------------
+### Months Saved
+
+```{r}
+
+    #   renderTable({
+    #   x<-rbind(tail(table(),1), tail(table_cont(),1))%>%
+    #     select(-Type) %>%
+    #     mutate(`Month Saved` = -(Month - lag(Month)),
+    #            `Interest Saved` = -(`Total Interest` - lag(`Total Interest`)),
+    #            `Total Payment Saved` = -(`Total Payment` - lag(`Total Payment`)))%>%
+    #     select(`Month Saved`,`Interest Saved`,`Total Payment Saved`)%>%
+    #     filter(!is.na(`Month Saved`))
+    # })
+
+ renderValueBox({
+      x<-rbind(tail(table(),1), tail(table_cont(),1))%>%
+        select(-Type) %>%
+        mutate(`Month Saved` = -(Month - lag(Month)),
+               `Interest Saved` = -(`Total Interest` - lag(`Total Interest`))
+               # `Total Payment Saved` = -(`Total Payment` - lag(`Total Payment`))
+               )%>%
+        select(`Month Saved`)%>%
+        filter(!is.na(`Month Saved`))
+        #        ,`Interest Saved`,`Total Payment Saved`)%>%
+        # filter(!is.na(`Month Saved`))
+        #        
+      months<-as.character(x)
+      valueBox(value = months,icon = "fa-calendar", color = 'success')
+    })
+```
+
+### Interest Saved
+
+```{r}
+ renderValueBox({
+      x<-rbind(tail(table(),1), tail(table_cont(),1))%>%
+        select(-Type) %>%
+        mutate(`Month Saved` = -(Month - lag(Month)),
+               `Interest Saved` = -(`Total Interest` - lag(`Total Interest`))
+               # `Total Payment Saved` = -(`Total Payment` - lag(`Total Payment`))
+               )%>%
+        filter(!is.na(`Month Saved`))%>%
+        select(`Interest Saved`)
+        #        ,`Interest Saved`,`Total Payment Saved`)%>%
+        # filter(!is.na(`Month Saved`))
+        #        
+      interest<-paste('$ ',format(round(as.numeric(x), 2), nsmall=1, big.mark=","))
+      valueBox(value = interest,icon = 'fa-money', color = 'success')
+    })
+```
+
+<!-- ### Total Payment Saved -->
+
+<!-- ```{r} -->
+<!--  renderValueBox({ -->
+<!--       x<-rbind(tail(table(),1), tail(table_cont(),1))%>% -->
+<!--         select(-Type) %>% -->
+<!--         mutate(`Month Saved` = -(Month - lag(Month)), -->
+<!--                `Interest Saved` = -(`Total Interest` - lag(`Total Interest`)), -->
+<!--                `Total Payment Saved` = -(`Total Payment` - lag(`Total Payment`)))%>% -->
+<!--         filter(!is.na(`Month Saved`))%>% -->
+<!--         select(`Total Payment Saved`) -->
+<!--         #        ,`Interest Saved`,`Total Payment Saved`)%>% -->
+<!--         # filter(!is.na(`Month Saved`)) -->
+<!--         #         -->
+<!--       total_pay<- paste('$ ',format(round(as.numeric(x), 2), nsmall=1, big.mark=",")) -->
+<!--       valueBox(value = total_pay,icon = "fa-money", color = 'success') -->
+<!--     }) -->
+<!-- ``` -->
+
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+
+### Summary
+
+```{r}
+
+renderTable({
+      rbind(tail(table(),1), tail(table_cont(),1))%>%
+        mutate(`Total Interest Paid ($)` = format(round(as.numeric(`Total Interest`), 2), nsmall=1, big.mark=","),
+                                       `Total Payment Made ($)` = format(round(as.numeric(`Total Payment`), 2), nsmall=1, big.mark=","),
+                                       `Total Additional Contributions` = format(round(as.numeric(`Total Contribution`), 2), nsmall=1, big.mark=","))%>%
+                                    select(Type, Month,`Total Additional Contributions`, `Total Interest Paid ($)`, `Total Payment Made ($)`)
+    })
+```
+
+Row {data-height=350}
+-------------------------------------
+### Savings Breakdown by Year
+
+```{r}
+
+max_cont_month<-reactive({max(table_cont()$Month)})
+
+table_x<-eventReactive(input$submit,{
+  year_savings<-data.frame()
+  # for (i in 1:(input$max_benefit%/%( input$employer_con*6))){
+  months_calc<-12
+  for (i in 1:(max_cont_month()%/%12)){
+      cont_t<-tail(calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term, 
+                                    min_monthly = input$min_monthly,employer_contribution = input$employer_cont, 
+                                    maximum_benefit = i*input$employer_cont*months_calc),1)
+      
+      no_cont_t<-tail(calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term, 
+                                  min_monthly = input$min_monthly,employer_contribution = 0, 
+                                  maximum_benefit = 0),1)
+      rb<-rbind(no_cont_t,cont_t)
+      xyx<-rb%>%
+        mutate(`Month Saved` = -(Month - lag(Month)),
+               `Interest Saved` = -(`Total Interest` - lag(`Total Interest`))
+               # `Total Payment Saved` = -(`Total Payment` - lag(`Total Payment`))
+               )%>%
+        mutate(`Total Contribution` = i*months_calc*input$employer_cont, `Months of Contribution` = i*months_calc)%>%
+        select(`Months of Contribution`,`Total Contribution`, `Month Saved`,  `Interest Saved`
+               # `Total Payment Saved`
+               )
+    year_savings<-rbind(year_savings,xyx)
+    if ( input$employer_cont*i >= input$max_benefit){
+      break
+    }
+  }
+  
+  db<-year_savings%>%
+       filter(!is.na(`Month Saved`))%>%
+       filter(`Total Contribution` <= input$max_benefit)%>%
+      mutate(`Interest Saved` = format(round(as.numeric(`Interest Saved`), 2), nsmall=1, big.mark=","),
+     # `Total Payment Saved` = format(round(as.numeric(`Total Payment Saved`), 2), nsmall=1, big.mark=","),
+     `Total Contribution` = format(round(as.numeric(`Total Contribution`), 2), nsmall=1, big.mark=","))
+  
+  cont_t<-tail(calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term, 
+                              min_monthly = input$min_monthly,employer_contribution = input$employer_cont, 
+                              maximum_benefit = input$max_benefit),1)
+      
+  no_cont_t<-tail(calculator_without_contribution(rate = input$rate, debt = input$debt, loan_term = input$loan_term, 
+                              min_monthly = input$min_monthly,employer_contribution = 0, 
+                              maximum_benefit = 0),1)
+
+  x_tail<-rbind(no_cont_t, cont_t)%>%
+        mutate(`Month Saved` = -(Month - lag(Month)),
+               `Interest Saved` = round(-(`Total Interest` - lag(`Total Interest`)),2),
+               # `Total Payment Saved` = round(-(`Total Payment` - lag(`Total Payment`)),2),
+                `Total Contribution` = round((`Total Contribution` - lag(`Total Contribution`)),2),
+               `Months of Contribution` = max_cont_month())%>%
+        select(`Months of Contribution`,`Total Contribution`, `Month Saved`,  `Interest Saved`
+               # `Total Payment Saved`
+               )%>%
+        mutate(`Interest Saved` = format(round(as.numeric(`Interest Saved`), 2), nsmall=1, big.mark=","),
+           # `Total Payment Saved` = format(round(as.numeric(`Total Payment Saved`), 2), nsmall=1, big.mark=","),
+           `Total Contribution` = format(round(as.numeric(`Total Contribution`), 2), nsmall=1, big.mark=","))%>%
+    filter(!is.na(`Month Saved`))
+        
+  db_x<-(rbind(db,x_tail))
+  db_x_unique<-db_x[!duplicated(db_x[,'Total Contribution']),]
+  return(db_x_unique)
+  # renderTable(knitr::kable(year_savings))
+})
+
+output$difference<-renderTable({
+  table_x()
+})
+
+tableOutput('difference')
+```
+
+### Savings Plot {data-padding=10}
+
+```{r}
+
+# output$test_am<-renderAmCharts({
+#   menu_obj <- list(list(format = "JPG", label ="Save as JPG", title = "Export chart to JPG"), 
+#                  list(format = "PNG", label ="Save as PNG", title = "Export chart to PNG"))
+#   
+#   db_cont<-table_cont()%>%
+#     select(Month, `Balance w/ Contribution` =`Ending Balance`)
+#   db<-table()%>%
+#     select(Month, `Balance w/o Contribution` =`Ending Balance`)
+#   
+#   db_merge<-merge(db, db_cont, by = 'Month', all.x = TRUE)%>%
+#     mutate(cont_ending = if_else(is.na(`Balance w/ Contribution`), 0, `Balance w/ Contribution`))%>%
+#     mutate(monthsss= as.POSIXct(ymd(Sys.Date()) %m+% months(Month)))
+#   
+#   amTimeSeries(db_merge, 'monthsss', c('Balance w/ Contribution', 'Balance w/o Contribution'),  groupToPeriods = 'MM', startDuration = 0) %>%
+#   # setExport(enabled = TRUE, menu = menu_obj)%>%
+#     plot()
+#   })
+# amChartsOutput('test_am')
+
+
+output$test_am<-renderHighchart({
+  # menu_obj <- list(list(format = "JPG", label ="Save as JPG", title = "Export chart to JPG"), 
+  #                list(format = "PNG", label ="Save as PNG", title = "Export chart to PNG"))
+  
+  db_cont<-table_cont()%>%
+    mutate(type = 'Balance w/ Contribution')%>%
+    mutate(Month= as.character((ymd(Sys.Date()) %m+% months(Month))))%>%
+    select(Month, type, `Ending Balance`)
+  db<-table()%>%
+    mutate(type = 'Balance w/o Contribution')%>%
+    mutate(Month= as.character((ymd(Sys.Date()) %m+% months(Month))))%>%
+    select(Month, type, `Ending Balance`)
+  
+  # db_merge<-merge(db, db_cont, by = 'Month', all.x = TRUE)%>%
+  #   mutate(cont_ending = if_else(is.na(`Balance w/ Contribution`), 0, `Balance w/ Contribution`))%>%
+  #   mutate(monthsss= as.POSIXct(ymd(Sys.Date()) %m+% months(Month)))
+  
+  db_bind<-rbind(db, db_cont)
+  
+  hchart(db_bind, "line", hcaes(x = Month, y = `Ending Balance`, group = type))%>%
+    hc_add_theme(hc_theme_538())%>%
+     hc_tooltip(table = TRUE, sort = TRUE)
+  
+  })
+highchartOutput('test_am')
+```
+
+
+Summary
+==============
+
+### Without Contribution Summary
+```{r}
+renderTable({
+  x<-table()%>%
+    select(-Type)
+  first<-x%>%
+    filter(Month == min(Month))
+  last<-x%>%
+    filter(Month == max(Month))
+  bet<-x[seq(0, nrow(x), 12),]
+  a<-rbind(first,bet,last)
+  unique(a)
+  })
+```
+
+
+### With Contribution Summary
+```{r}
+renderTable({
+  x<-table_cont()%>%
+    select(-Type)
+  first<-x%>%
+    filter(Month == min(Month))
+  last<-x%>%
+    filter(Month == max(Month))
+  bet<-x[seq(0, nrow(x), 12),]
+  a<-rbind(first,bet,last)
+  unique(a)
+  })
+```
+
